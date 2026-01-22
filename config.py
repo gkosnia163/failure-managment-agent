@@ -70,11 +70,11 @@ except:
 # --- 3. ΚΑΤΕΒΑΣΜΑ ΜΟΝΤΕΛΟΥ (ΑΝ ΔΕΝ ΥΠΑΡΧΕΙ) ---
 # Ελέγχουμε αν το μοντέλο υπάρχει στη λίστα
 result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-if "llama3.2:1b" not in result.stdout:
-    print("Το μοντέλο llama3.2:1b δεν βρέθηκε. Κατέβασμα (αυτό μπορεί να πάρει λίγο)...")
-    subprocess.run(["ollama", "pull", "llama3.2:1b"], check=True)
+if "lfm2.5-thinking:1.2b" not in result.stdout:
+    print("Το μοντέλο lfm2.5-thinking:1.2b δεν βρέθηκε. Κατέβασμα (αυτό μπορεί να πάρει λίγο)...")
+    subprocess.run(["ollama", "pull", "lfm2.5-thinking:1.2b"], check=True)
 else:
-    print("✓ Το μοντέλο llama3.2:1b είναι ήδη κατεβασμένο.")
+    print("✓ Το μοντέλο lfm2.5-thinking:1.2b είναι ήδη κατεβασμένο.")
 
 # --- 4. ΕΓΚΑΤΑΣΤΑΣΗ ΒΙΒΛΙΟΘΗΚΗΣ PYTHON ---
 if importlib.util.find_spec("ollama") is None:
