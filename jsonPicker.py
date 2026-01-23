@@ -1,3 +1,8 @@
+# ΔΙΟΡΘΩΣΗ: Προσθέτει τις εισαγωγές που λείπουν
+import sys
+import json
+import os
+
 SCENARIO_FILE = sys.argv[1] if len(sys.argv) > 1 else "data.json"
 
 def load_world_state(filename):
@@ -8,7 +13,7 @@ def load_world_state(filename):
         return json.load(f)
 
 def save_world_state(state, filename):
-    # Αποθηκεύει τα αποτελέσματα σε νέο αρχείο 'results_...' για να μη χαλάσει το αρχικό σενάριο
+    # Αποθηκεύει τα αποτελέσματα σε νέο αρχείο 'results_...'
     result_file = "result_" + filename
     with open(result_file, 'w', encoding='utf-8') as f:
         json.dump(state, f, indent=4, ensure_ascii=False)

@@ -11,7 +11,7 @@ if __name__ == '__main__':
 
 seed = "1407931694"
 assigned_domain = "Infrastructure Failure Management Agent"
-base_path = "/Users/kostasniafas/Library/CloudStorage/GoogleDrive-dit21140@go.uop.gr/My Drive/Agent"
+base_path = r"C:\Users\kostas niafas\Desktop\ollama-agent"
 runs_path = os.path.join(base_path, "runs")
 
 # Δημιουργία φακέλου runs (και του base_path αν λείπει)
