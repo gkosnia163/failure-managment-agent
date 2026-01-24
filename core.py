@@ -1,60 +1,55 @@
-import json, time, os, sys, glob
-from datetime import datetime
+import json, time, os, sys
 from enum import Enum
-from typing import List, Dict, Union
+from typing import Dict
+from datetime import datetime
+
 import config
-import ollama
-from scenarios import jsonPicker
-
-WORLD_STATE = {}
-
-# ==========================================
-# 2. TOOLS
-# ==========================================
-def detect_failure_nodes() -> List[str]:
-    return [n for n, d in WORLD_STATE["nodes"].items() if d["status"] == "Broken"]
-
-def estimate_impact(node_id: str) -> Dict[str, Union[str, int]]:
-    if node := WORLD_STATE["nodes"].get(node_id):
-        return {"node_id": node_id, "type": node["type"], 
-                "population_affected": node["population_affected"], "criticality": node["criticality"]}
-    return {"error": "Node not found"}
-
-def assign_repair_crew(node_ids: List[str], crew_ids: List[str]) -> Dict[str, str]:
-    results = {}
-    for n, c in zip(node_ids, crew_ids):
-        crew_status = WORLD_STATE["crews"][c]["status"]
-        if crew_status != "Available":
-            results[f"{c}->{n}"] = f"Failed (Crew {crew_status})"
-        else:
-            WORLD_STATE["nodes"][n]["status"] = "Repairing"
-            WORLD_STATE["crews"][c]["status"] = "Busy"  # Το crew γίνεται Busy!
-            results[f"{c}->{n}"] = "Success"
-            print(f"  🛠️  Crew {c} is now BUSY repairing {n}")
-    return results
-
-def check_crew_availability() -> Dict[str, str]:
-    """Check status of all crews"""
-    return {c: d["status"] for c, d in WORLD_STATE["crews"].items()}
+from scenarios import jsonPicker 
+from tools import toolList
 
 # ==========================================
 # 3. LLM INTERFACE
 # ==========================================
 def llm_call(system_prompt: str, user_context: str) -> Dict:
     try:
-        response = ollama.chat(model="lfm2.5-thinking:1.2b", messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_context}
-        ], format="json", options={"temperature": 0.0})
-        return json.loads(response["message"]["content"])
-    except:
-        return {"thought": "LLM error", "action": "none", "arguments": {}}
+        if config.USE_CLOUD:
+            import openai
+            # Ρύθμιση Client ανάλογα με τον provider
+            base_url = "https://api.groq.com/openai/v1" if config.CLOUD_PROVIDER == "groq" else None
+            client = openai.OpenAI(api_key=config.CLOUD_API_KEY, base_url=base_url)
+            
+            response = client.chat.completions.create(
+                model=config.CLOUD_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_context}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
+            content = response.choices[0].message.content
+            # Καθαρισμός αν το μοντέλο επιστρέψει markdown code block
+            if content.strip().startswith("```json"):
+                content = content.strip()[7:-3]
+            elif content.strip().startswith("```"):
+                content = content.strip()[3:-3]
+            return json.loads(content)
+        else:
+            # Local Ollama fallback
+            import ollama
+            response = ollama.chat(model="llama3.2:latest", messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_context}
+            ], format="json", options={"temperature": 0.1})
+            return json.loads(response["message"]["content"])
+    except Exception as e:
+        return {"thought": f"LLM error: {str(e)}", "action": "none", "arguments": {}, "next_state": "FINAL"}
 
 # ==========================================
 # 4. FSM & AGENT
 # ==========================================
 class AgentState(Enum):
-    DETECT, ANALYZE, PLAN, ACT, FINAL = range(1, 6)
+    DETECT, ANALYZE, PLAN, ACT, WAIT, FINAL = "DETECT", "ANALYZE", "PLAN", "ACT", "WAIT", "FINAL"
 
 class InfrastructureAgent:
     def __init__(self, max_steps=20):
@@ -63,229 +58,175 @@ class InfrastructureAgent:
         self.max_steps = max_steps
         self.memory = {"context": {}, "history": []}
 
-    def get_system_prompt(self, remaining_nodes=None):
+    def get_system_prompt(self):
         base = """
-            You are an Infrastructure Failure Management Agent.
-            GOAL: Your primary objective is to EXECUTE REPAIRS. You must prioritize fixing nodes based on criticality (Critical > High > Medium > Low).
-
+            You are an Autonomous Infrastructure Failure Management Agent.
+            GOAL: Analyze infrastructure failures and assign the best available repair crews based on criticality.
+            
             AVAILABLE TOOLS:
             1. detect_failure_nodes() -> list: Returns broken node IDs.
-            2. estimate_impact(node_id: str) -> dict: Returns impact metrics.
-            3. assign_repair_crew(node_ids: list, crew_ids: list) -> dict: Assigns crews.
-            4. finalize() -> None: Ends the mission.
+            2. estimate_impact(node_id: str) -> dict: Returns impact metrics (population, criticality).
+            3. assign_repair_crew(node_ids: list, crew_ids: list) -> dict: Assigns crews to nodes.
+            4. check_crew_availability() -> Dict: Crew IDs mapped to their current status ('Available' or 'Busy').
+            5. none: Use this if you just want to change state without calling a tool.
+
+            RULES FOR PLANNING:
+            - You must match available crews to nodes. 
+            - 'General' crews can fix anything. Specialized crews only fix their type.
+            - Prioritize 'Critical' nodes over 'High/Medium/Low'.
+            - If two or multiple nodes are broken, prioritize fixing the node with the most population 
 
             RESPONSE FORMAT:
-            You must respond with a JSON object containing:
-            - "thought": A brief reasoning for your action.
+            You must respond ONLY with a valid JSON object containing:
+            - "thought": Explain your reasoning (Chain-of-Thought).
             - "action": The name of the tool to call.
             - "arguments": A dictionary of arguments for the tool.
-
-            PHASE INSTRUCTIONS:
-            - If phase is 'DETECT': Call detect_failure_nodes.
-            - If phase is 'ANALYZE': Call estimate_impact for a node.
-            - If phase is 'PLAN': Call assign_repair_crew.
-            - PRIORITY RULE: You MUST repair 'Critical' nodes before 'High', and 'High' before 'Low'.
-            - MATCHING RULE: 
-                - 'General' crews can fix ANY node.
-                - Specialized crews (e.g. 'Electrical') can only fix their specific type.
-                - NEVER assign a mismatched crew (e.g. 'Water' crew to 'Power' node).
-
-            User Input: { "phase": "ANALYZE", "context": { "failures": ["Node_99"] } }
-            Model Response:
-            {
-            "thought": "I found a failure at Node_99. I need to check its impact.",
-            "action": "estimate_impact",
-            "arguments": { "node_id": "Node_99" }
-            }
-
-            User Input: { "phase": "PLAN", "context": { "impact_reports": [{"node_id": "Node_99", "criticality": "High"}] }, "available_crews": ["Crew_Alpha"] }
-            Model Response:
-            {
-            "thought": "Node_99 is High criticality. I will assign Crew_Alpha.",
-            "action": "assign_repair_crew",
-            "arguments": { "node_ids": ["Node_99"], "crew_ids": ["Crew_Alpha"] }
-            }
+            - "next_state": The next state to transition to (DETECT, ANALYZE, PLAN, ACT, WAIT, FINAL).
             """
         
-        
-        prompts = {
-            AgentState.DETECT: "CURRENT STATE: DETECT\nACTION: detect_failure_nodes",
-            AgentState.ANALYZE: f"CURRENT STATE: ANALYZE\nREMAINING: {remaining_nodes or 'Analyze one node'}\nACTION: estimate_impact",
-            AgentState.PLAN: "CURRENT STATE: PLAN\nACTION: none",
-            AgentState.ACT: "CURRENT STATE: ACT\nACTION: assign_repair_crew"
+        # State-specific dynamic instructions to help the small model
+        state_guidance = {
+            AgentState.DETECT: "CURRENT STATE: DETECT. You MUST call 'detect_failure_nodes' to identify issues. Do NOT transition to FINAL yet.",
+            AgentState.ANALYZE: "CURRENT STATE: ANALYZE. You MUST call 'estimate_impact' for one node from 'remaining_to_analyze'. If 'remaining_to_analyze' is empty, transition to PLAN.",
+            AgentState.PLAN: "CURRENT STATE: PLAN. You MUST call 'assign_repair_crew' to fix 'failed_nodes'. If all nodes are assigned or no crews are available, transition to FINAL.",
+            AgentState.WAIT: "CURRENT STATE: WAIT. No action needed. Wait for crews to become available."
         }
         
-        return base + "\n" + prompts.get(self.state, "")
+        return base + "\n" + state_guidance.get(self.state, "")
 
     def step(self):
         self.step_count += 1
-        print(f"\n{'='*50}\nSTEP {self.step_count} | STATE: {self.state.name}\n{'='*50}")
+        print(f"\n{'='*50}\nSTEP {self.step_count} | CURRENT STATE: {self.state.value}\n{'='*50}")
 
-        # Get current status
-        available_crews = [c for c, d in WORLD_STATE["crews"].items() if d["status"] == "Available"]
-        busy_crews = [c for c, d in WORLD_STATE["crews"].items() if d["status"] == "Busy"]
+        # 1. OBSERVE: Gather context for the LLM
+        available_crews = [c for c, d in config.WORLD_STATE["crews"].items() if d["status"] == "Available"]
         failures = self.memory["context"].get("failures", [])
-        analyzed = [r["node_id"] for r in self.memory["context"].get("impact_reports", [])]
-        remaining = [n for n in failures if n not in analyzed] if self.state == AgentState.ANALYZE else []
+        analyzed_reports = self.memory["context"].get("impact_reports", [])
+        analyzed_ids = [r["node_id"] for r in analyzed_reports]
+        remaining_to_analyze = [n for n in failures if n not in analyzed_ids]
         
-        context = {
-            "state": self.state.name,
+        # Dynamic instructions in context to force action
+        instructions = ""
+        if self.state == AgentState.DETECT:
+            instructions = "Action Required: Call 'detect_failure_nodes'. Do not stop."
+        elif self.state == AgentState.ANALYZE:
+            instructions = "Action Required: Call 'estimate_impact' for a node in 'remaining_to_analyze'. If empty, go to PLAN."
+        elif self.state == AgentState.PLAN:
+            instructions = "Action Required: Call 'assign_repair_crew' for unassigned nodes."
+
+        context_data = {
+            "current_state": self.state.value,
+            "instructions": instructions,
             "failed_nodes": failures,
-            "analyzed_nodes": analyzed,
-            "remaining_to_analyze": remaining,
+            "remaining_to_analyze": remaining_to_analyze,
+            "impact_reports": analyzed_reports,
             "available_crews": available_crews,
-            "busy_crews": busy_crews,
-            "all_crews_status": check_crew_availability()
         }
         
-        print(f"[CONTEXT]: {json.dumps(context, indent=2)}")
+        user_context = json.dumps(context_data, indent=2)
+        system_prompt = self.get_system_prompt()
+
+        # Απαίτηση της εκφώνησης: Εκτύπωση του Prompt
+        print(f"[PROMPT]: {system_prompt}\nCONTEXT DATA: {user_context}")
         
-        # Get LLM decision
-        decision = llm_call(self.get_system_prompt(remaining), json.dumps(context))
-        print(f"[DECISION]: {json.dumps(decision, indent=2)}")
+        # 2. THINK: Call LLM
+        decision = llm_call(system_prompt, user_context)
+        
+        # Απαίτηση της εκφώνησης: Εκτύπωση του Raw LLM output
+        print(f"[RAW LLM]: {json.dumps(decision, indent=2)}")
         
         action = decision.get("action", "none")
         args = decision.get("arguments", {})
-        thought = decision.get("thought", "No reasoning")
+        thought = decision.get("thought", "No reasoning provided")
+        next_state_str = decision.get("next_state", self.state.value)
         
         print(f"[THOUGHT]: {thought}")
         print(f"[ACTION]: {action}")
         
-        # Execute based on state
-        observation = self.execute_state_action(action, args, failures, analyzed, remaining, available_crews)
+        # 3. ACT: Execute the chosen tool dynamically
+        observation = {}
+        if action == "detect_failure_nodes":
+            observation = toolList.detect_failure_nodes()
+            self.memory["context"]["failures"] = observation
         
+        elif action == "estimate_impact":
+            node_id = args.get("node_id")
+            if node_id:
+                observation = toolList.estimate_impact(node_id)
+                self.memory["context"].setdefault("impact_reports", []).append(observation)
+            else:
+                observation = {"error": "Missing node_id argument"}
+        
+        elif action == "assign_repair_crew":
+            node_ids = args.get("node_ids", [])
+            crew_ids = args.get("crew_ids", [])
+            observation = toolList.assign_repair_crew(node_ids, crew_ids)
+
+        # Απαίτηση της εκφώνησης: Εκτύπωση του Observation
         print(f"[OBSERVATION]: {observation}")
         
-        # Save history
+        # DYNAMIC TRANSITION: Update state based on LLM's choice
+        try:
+            self.state = AgentState(next_state_str)
+        except ValueError:
+            print(f"[WARNING] Invalid next_state '{next_state_str}' returned by LLM. Maintaining current state.")
+
+        # Memory Management (Sliding Window)
         self.memory["history"].append({
-            "step": self.step_count, "state": self.state.name,
-            "thought": thought, "action": action, "observation": observation,
-            "crews_status": check_crew_availability()
+            "step": self.step_count, 
+            "state": self.state.value,
+            "action": action, 
+            "observation": observation
         })
-
-    def execute_state_action(self, action, args, failures, analyzed, remaining, available_crews):
-        # DETECT state
-        if self.state == AgentState.DETECT:
-            if action != "detect_failure_nodes":
-                action = "detect_failure_nodes"
-            
-            obs = detect_failure_nodes()
-            self.memory["context"]["failures"] = obs
-            self.state = AgentState.ANALYZE if obs else AgentState.FINAL
-            return obs
-        
-        # ANALYZE state
-        elif self.state == AgentState.ANALYZE:
-            # Optimization: Analyze ALL remaining nodes in one go to save steps
-            reports = []
-            for node_id in remaining:
-                if node_id in failures:
-                    obs = estimate_impact(node_id)
-                    reports.append(obs)
-            
-            if reports:
-                self.memory["context"].setdefault("impact_reports", []).extend(reports)
-                self.state = AgentState.PLAN
-                return {"analyzed_nodes": [r["node_id"] for r in reports]}
-            return {"error": "No nodes to analyze"}
-        
-        # PLAN state
-        elif self.state == AgentState.PLAN:
-            impacts = self.memory["context"].get("impact_reports", [])
-            
-            if not impacts:
-                self.state = AgentState.FINAL
-                return {"error": "No impacts to plan"}
-            
-            # Sort by priority
-            priority = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-            impacts.sort(key=lambda x: (priority[x["criticality"]], x["population_affected"]), reverse=True)
-            
-            # Smart Matching Logic
-            plan = []
-            used_crews = set()
-            crew_details = {c: WORLD_STATE["crews"][c] for c in available_crews}
-
-            for imp in impacts:
-                node_type = imp["type"]
-                candidates = []
-                
-                # Find compatible crews
-                for c_id, c_data in crew_details.items():
-                    if c_id not in used_crews:
-                        if c_data["specialty"] == node_type or c_data["specialty"] == "General":
-                            # Priority: Specific (0) > General (1)
-                            score = 0 if c_data["specialty"] == node_type else 1
-                            candidates.append((score, c_id))
-                
-                if candidates:
-                    candidates.sort() # Sort by score (Specific first)
-                    best_crew = candidates[0][1]
-                    plan.append({"node": imp["node_id"], "crew": best_crew})
-                    used_crews.add(best_crew)
-            
-            self.memory["context"]["repair_plan"] = plan
-            
-            if plan:
-                self.state = AgentState.ACT
-                return {"plan": plan}
-            else:
-                self.state = AgentState.FINAL
-                return {"error": "No available crews for repair"}
-        
-        # ACT state
-        elif self.state == AgentState.ACT:
-            plan = self.memory["context"].get("repair_plan", [])
-            
-            # Force execution of the calculated plan (ignore LLM args to avoid hallucinations)
-            node_ids = [p["node"] for p in plan]
-            crew_ids = [p["crew"] for p in plan]
-            
-            obs = assign_repair_crew(node_ids, crew_ids)
-            self.state = AgentState.FINAL
-            
-            return obs
-        
-        return {"error": "Invalid state"}
+        if len(self.memory["history"]) > 5:
+            self.memory["history"] = self.memory["history"][-5:]
 
     def run(self):
-        print("--- INFRASTRUCTURE AGENT STARTED ---")
-        self.state = AgentState.DETECT # Force Start State
-        
-        while self.state != AgentState.FINAL and self.step_count < self.max_steps:
-            self.step()
-            time.sleep(1)
-
-        print("\n--- AGENT FINISHED ---")
-        print("Final World State (Check if nodes are Repairing):")
-        print(json.dumps(WORLD_STATE["nodes"], indent=2))
-        
-        # --- ΠΡΟΣΘΗΚΗ ΓΙΑ ΑΠΟΘΗΚΕΥΣΗ LOGS ---
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Αν δεν έχεις το config.runs_path, βάλε απλά "run_" + ts + ".json"
-        log_filename = f"run_log_{ts}.json" 
-        with open(log_filename, "w", encoding="utf-8") as f:
-            # Αποθηκεύει όλη τη μνήμη και το ιστορικό του Agent
-            json.dump(self.memory, f, indent=2, ensure_ascii=False)
+        log_filename = f"run_log_{ts}.txt"
+
+        class DualLogger:
+            def __init__(self, filepath):
+                self.terminal = sys.stdout
+                self.log = open(filepath, "w", encoding="utf-8")
+            def write(self, message):
+                self.terminal.write(message)
+                self.log.write(message)
+            def flush(self):
+                self.terminal.flush()
+                self.log.flush()
+            def close(self):
+                self.log.close()
+
+        original_stdout = sys.stdout
+        sys.stdout = DualLogger(log_filename)
+        
+        try:
+            print("--- INFRASTRUCTURE AGENT STARTED ---")
+            
+            while self.state != AgentState.FINAL and self.step_count < self.max_steps:
+                self.step()
+                time.sleep(1)
+
+            print("\n--- AGENT FINISHED ---")
+            print("Final World State:")
+            print(json.dumps(config.WORLD_STATE["nodes"], indent=2))
+        finally:
+            sys.stdout.close()
+            sys.stdout = original_stdout
+            
         print(f"\n Το Log αποθηκεύτηκε στο αρχείο: {log_filename}")
 
 if __name__ == "__main__":
-    # Find all scenario files in the scenarios directory
     scenario_files = jsonPicker.get_available_scenarios()
-
     print(f"Found {len(scenario_files)} scenarios to run.")
-    print(f"[CORE] Found {len(scenario_files)} scenarios to run.")
 
     for scenario_path in scenario_files:
         scenario_name = os.path.basename(scenario_path)
-        print(f"\n{'#'*50}\nRUNNING SCENARIO: {scenario_name}\n{'#'*50}")
-        print(f"\n{'#'*50}\n[CORE] RUNNING SCENARIO: {scenario_name}\n{'#'*50}")
+        print(f"\n{'▬'*50}\nRUNNING SCENARIO: {scenario_name}\n{'▬'*50}")
         
-        # Load scenario into WORLD_STATE
-        WORLD_STATE.clear()
-        WORLD_STATE.update(jsonPicker.load_world_state(scenario_path))
+        config.WORLD_STATE.clear()
+        config.WORLD_STATE.update(jsonPicker.load_world_state(scenario_path))
         
-        print("Starting Infrastructure Agent...")
-        print("[CORE] Starting Infrastructure Agent...")
         agent = InfrastructureAgent(max_steps=15)
-        agent.run()        
+        agent.run()

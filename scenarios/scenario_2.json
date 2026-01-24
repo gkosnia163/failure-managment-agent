@@ -1,9 +1,10 @@
 {
     "nodes": {
-      "Node_Main_Relay": {"status": "Broken", "type": "Telecom", "population_affected": 10000, "criticality": "High"}
+      "Node_Hospital_Power": {"status": "Broken", "type": "Power", "population_affected": 2000, "criticality": "Critical"},
+      "Node_City_Water": {"status": "Broken", "type": "Water", "population_affected": 50000, "criticality": "Critical"}
     },
     "crews": {
-      "Crew_Alpha": {"status": "Busy", "specialty": "General"},
-      "Crew_Beta": {"status": "Busy", "specialty": "Electrical"}
+      "Crew_Alpha": {"status": "Available", "specialty": "General"}
     }
   }
+  
