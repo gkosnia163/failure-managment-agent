@@ -38,7 +38,7 @@ def llm_call(system_prompt: str, user_context: str) -> Dict:
         else:
             # Local Ollama fallback
             import ollama
-            response = ollama.chat(model="granite4:3b", messages=[
+            response = ollama.chat(model="qwen3:4b", messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_context}
             ], format="json", options={"temperature": 0.1})
@@ -90,7 +90,7 @@ class InfrastructureAgent:
             AgentState.DETECT: "CURRENT STATE: DETECT. You MUST call 'detect_failure_nodes' to identify issues. Do NOT transition to FINAL yet.",
             AgentState.ANALYZE: "CURRENT STATE: ANALYZE. You MUST call 'estimate_impact' for one node from 'remaining_to_analyze'. If 'remaining_to_analyze' is empty, transition to PLAN.",
             AgentState.PLAN: "CURRENT STATE: PLAN. You MUST call 'assign_repair_crew' to fix 'failed_nodes'. If all nodes are assigned or no crews are available, transition to FINAL.",
-            AgentState.WAIT: "CURRENT STATE: WAIT. No action needed. Wait for crews to become available."
+            AgentState.WAIT: "CURRENT STATE: WAIT. No action needed. If no actions are available, Trasnition to FINAL."
         }
         
         return base + "\n" + state_guidance.get(self.state, "")
@@ -106,19 +106,12 @@ class InfrastructureAgent:
         analyzed_ids = [r["node_id"] for r in analyzed_reports if "node_id" in r]
         remaining_to_analyze = [n for n in failures if n not in analyzed_ids]
         
-        # Dynamic instructions in context to force action
-        instructions = ""
-        if self.state == AgentState.DETECT:
-            instructions = "Action Required: Call 'detect_failure_nodes'. Do not stop."
-        elif self.state == AgentState.ANALYZE:
-            instructions = "Action Required: Call 'estimate_impact' for a node in 'remaining_to_analyze'. If empty, go to PLAN."
-        elif self.state == AgentState.PLAN:
-            instructions = "Action Required: Call 'assign_repair_crew' for unassigned nodes."
+        recent_history = self.memory["history"]
 
         context_data = {
             "current_state": self.state.value,
-            "instructions": instructions,
-            "failed_nodes": failures,
+            "past_actions": recent_history,
+            "failed_nodes": failures,          #λειτουργία με memory
             "remaining_to_analyze": remaining_to_analyze,
             "impact_reports": analyzed_reports,
             "available_crews": available_crews,
@@ -140,9 +133,6 @@ class InfrastructureAgent:
         args = decision.get("arguments", {})
         thought = decision.get("thought", "No reasoning provided")
         next_state_str = decision.get("next_state", self.state.value)
-        
-        print(f"[THOUGHT]: {thought}")
-        print(f"[ACTION]: {action}")
         
         # 3. ACT: Execute the chosen tool dynamically
         observation = {}
@@ -179,8 +169,8 @@ class InfrastructureAgent:
             "action": action, 
             "observation": observation
         })
-        if len(self.memory["history"]) > 5:
-            self.memory["history"] = self.memory["history"][-5:]
+        if len(self.memory["history"]) > 8: #αποθηκεύονται μόνο 5 προηγούμενα steps
+            self.memory["history"] = self.memory["history"][-8:]
 
     def run(self):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")

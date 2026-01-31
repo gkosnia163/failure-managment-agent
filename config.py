@@ -6,6 +6,19 @@ import os
 import sys
 import json
 
+Warning_message = """
+\nΠΡΟΣΟΧΗ!
+--------------------------------------------------------------------------
+-Σε περίπτωση που δεν θα τρέξει το πρόγραμμα με API key, 
+ κατεβαίνει το ollama και ανάλογο μοντέλο ≈ 4 GIGABYTE! <---ΠΡΟΣΟΧΗ 
+
+
+-Για χρήση API key, απαιτείται η ένταξη API key στο config.py scripts
+ Γραμμή 29 @config.py:
+ CLOUD_API_KEY = "" #βάλτε το δικό σας API key apo https://console.groq.com -> φτιάξε account -> φτιάξε key βάλτο εδώ (συνήθως ξεκινάει με gsk_)
+ Χρησιμοποιούμε την πλατφόρμα groq για τα κλειδιά μας, για δωρεάν χρήση (με όριο) μοντέλο openai-gpt-oss.128\n\n\n"""
+print(Warning_message)
+
 VERBOSE = True
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_config.json")
@@ -22,7 +35,14 @@ else:
 # True = groq api | False = Ollama - local
 if VERBOSE: print(f"[CONFIG] Cloud enabled: {USE_CLOUD}")
 CLOUD_PROVIDER = "groq"  # 'groq' ή 'openai'
+
+
+#----ΒΑΛΤΕ ΤΟ groq api key παρακάτω ανάμεσα στα CLOUD_API_KEY = "here"----
+################################################################################################################################################
 CLOUD_API_KEY = "" #βάλτε το δικό σας API key apo https://console.groq.com -> φτιάξε account -> φτιάξε key βάλτο εδώ (συνήθως ξεκινάει με gsk_)
+################################################################################################################################################
+
+
 CLOUD_MODEL = "openai/gpt-oss-120b"
 
 if __name__ == '__main__':
@@ -30,8 +50,13 @@ if __name__ == '__main__':
 
 seed = "1407931694"
 assigned_domain = "Infrastructure Failure Management Agent"
-base_path = r""
-runs_path = os.path.join(base_path, "runs")
+
+
+#----ΒΑΛΤΕ ΤΟ path που θέλετε να πηγαίνουν τα runs σας (κενό = πάνε στο ίδιο μέρος με αυτό το script)----
+#################################################################################################################################################
+base_path = r"" #    <-ανάμεσα απο τα ""    
+runs_path = os.path.join(base_path, "")
+#################################################################################################################################################
 
 # Δημιουργία φακέλου runs (και του base_path αν λείπει)
 try:
@@ -81,9 +106,9 @@ if not USE_CLOUD:
 
     # ΚΑΤΕΒΑΣΜΑ ΜΟΝΤΕΛΟΥ
     result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-    if "granite4:3b" not in result.stdout:
-        if VERBOSE: print("[CONFIG] Το μοντέλο granite4:3b δεν βρέθηκε. Κατέβασμα...")
-        subprocess.run(["ollama", "pull", "granite4:3b"], check=True)
+    if "qwen3:4b" not in result.stdout:
+        if VERBOSE: print("[CONFIG] Το μοντέλο qwen3:4b δεν βρέθηκε. Κατέβασμα...")
+        subprocess.run(["ollama", "pull", "qwen3:4b"], check=True)
 
     # ΕΓΚΑΤΑΣΤΑΣΗ ΒΙΒΛΙΟΘΗΚΗΣ PYTHON OLLAMA
     if importlib.util.find_spec("ollama") is None:
